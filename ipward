@@ -1,0 +1,108 @@
+#!/bin/sh
+
+# --- Variables globales ---
+SYSCTL_PARAM=""          # Nombre del parámetro según OS
+PERSIST_FILE=""          # Ruta del archivo de configuración
+PRIV_CMD=""              # Comando de privilegios (sudo/doas)
+CURRENT_FORWARD=0        # Valor actual del IP Forwarding
+
+# --- Detectar OS y configurar parámetros ---
+detect_os() {
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    case "$OS" in
+        linux)
+            if [ -f /etc/os-release ]; then
+                . /etc/os-release
+                OS="$ID"  # Sobrescribir con distro específica (debian, ubuntu, etc.)
+            fi
+            SYSCTL_PARAM="net.ipv4.ip_forward"
+            PERSIST_FILE="/etc/sysctl.conf"
+            ;;
+        freebsd|openbsd|netbsd)
+            SYSCTL_PARAM="net.inet.ip.forwarding"
+            PERSIST_FILE="/etc/sysctl.conf"
+            ;;
+        *)
+            echo "[ERROR] Sistema no soportado: $OS"
+            exit 1
+            ;;
+    esac
+}
+
+# --- Verificar si el IP Forwarding ya está activado ---
+check_current_forward() {
+    if [ "$OS" = "linux" ]; then
+        CURRENT_FORWARD=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)
+    else
+        CURRENT_FORWARD=$(sysctl -n "$SYSCTL_PARAM" 2>/dev/null || echo 0)
+    fi
+
+    if [ "$CURRENT_FORWARD" -eq 1 ]; then
+        echo "El IP Forwarding ya está activado. Nada que hacer."
+        exit 0
+    fi
+}
+
+# --- Aplicar cambios temporales ---
+enable_temp() {
+    if [ "$OS" = "linux" ]; then
+        $PRIV_CMD sysctl -w "$SYSCTL_PARAM=1"
+    else
+        $PRIV_CMD sysctl "$SYSCTL_PARAM=1"
+    fi
+}
+
+# --- Aplicar cambios persistentes ---
+enable_persistent() {
+    case "$OS" in
+        debian|ubuntu|linuxmint|raspbian)
+            echo "$SYSCTL_PARAM=1" | $PRIV_CMD tee /etc/sysctl.d/90-ipforward.conf >/dev/null
+            ;;
+        freebsd|openbsd|netbsd|fedora|centos|rhel|arch|manjaro)
+            echo "$SYSCTL_PARAM=1" | $PRIV_CMD tee -a "$PERSIST_FILE" >/dev/null
+            ;;
+        *)
+            echo "[WARN] Usando método genérico para $OS."
+            echo "$SYSCTL_PARAM=1" | $PRIV_CMD tee -a "$PERSIST_FILE" >/dev/null
+            ;;
+    esac
+
+    # Recargar configuración
+    if [ "$OS" = "linux" ]; then
+        $PRIV_CMD sysctl --system
+    else
+        $PRIV_CMD sysctl "$SYSCTL_PARAM=1"  # Asegurar carga en BSD
+    fi
+}
+
+# --- Verificar permisos ---
+check_privileges() {
+    if [ "$(id -u)" -ne 0 ]; then
+        if command -v sudo >/dev/null; then
+            PRIV_CMD="sudo"
+        elif command -v doas >/dev/null; then
+            PRIV_CMD="doas"
+        else
+            echo "[ERROR] Necesitas root, sudo o doas."
+            exit 1
+        fi
+
+        # Verificar si el comando de privilegios funciona
+        if ! $PRIV_CMD true; then
+            echo "[ERROR] Sin permisos para $PRIV_CMD."
+            exit 1
+        fi
+    else
+        PRIV_CMD=""  # No necesita comandos de privilegios
+    fi
+}
+
+# --- Ejecución principal ---
+detect_os
+check_privileges
+check_current_forward
+enable_temp
+enable_persistent
+
+echo "¡IP Forwarding activado en $OS correctamente!"
+exit 0
